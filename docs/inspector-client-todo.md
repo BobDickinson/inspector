@@ -94,8 +94,8 @@ If we are in a container:
 
 ### Next Steps
 
-- **Unify OAuth storage path and serialization (local vs remote)**
-  - Migrate the web app to use RemoteOAuthStorage (backed by the Inspector API server’s `/api/storage/:storeId`) instead of BrowserOAuthStorage, so web shares OAuth state with CLI/TUI when using the same server.
+- **Unify OAuth storage path and serialization (local vs remote)** — **not done:** `web/src/lib/adapters/environmentFactory.ts` still uses `BrowserOAuthStorage`.
+  - Migrate `createWebEnvironment()` to **`RemoteOAuthStorage`** (Inspector API **`/api/storage/oauth`**, default `storeId` `oauth`) with the same `baseUrl` / `authToken` / `fetchFn` as other remote adapters, so web shares OAuth state with CLI/TUI (`NodeOAuthStorage` on the API host). See [environment-isolation.md](environment-isolation.md).
 - **Extract form generator into core, extend as needed**
   - See: [form-generation-extraction-plan.md](form-generation-extraction-plan.md)
 - **Redesign launcher**

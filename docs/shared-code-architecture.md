@@ -9,7 +9,7 @@ This document describes the **as-built** architecture for the MCP Inspector. The
 The architecture uses **environment isolation** to separate portable JavaScript from environment-specific code (Node.js vs. browser). `InspectorClient` is portable and accepts **injected dependencies** (seams) for environment-specific behavior:
 
 - **CLI/TUI (Node)**: Inject Node-specific implementations (`createTransportNode`, `NodeOAuthStorage`, file-based logging)
-- **Web client (Browser)**: Inject browser-specific implementations (`createRemoteTransport`, `createRemoteFetch`, `createRemoteLogger`, `BrowserOAuthStorage` or `RemoteOAuthStorage`)
+- **Web client (Browser)**: Inject browser-specific implementations (`createRemoteTransport`, `createRemoteFetch`, `createRemoteLogger`, OAuth storage). **`createWebEnvironment()`** still uses **`BrowserOAuthStorage`**; **`RemoteOAuthStorage`** (Inspector **`/api/storage/oauth`**) is the planned path for the same token store as Node—see [environment-isolation.md](environment-isolation.md).
 
 `InspectorClient` remains unaware of which environment it's running in—it just uses the injected dependencies. This allows the same code to run in Node (CLI, TUI) and browser (web client). See [environment-isolation.md](environment-isolation.md) for detailed design.
 
@@ -35,7 +35,7 @@ The architecture addresses these issues by providing a single source of truth fo
 **Key concept**: Each environment (CLI, TUI, web client) injects environment-specific dependencies into `InspectorClient`. All three use the same `InspectorClient` and optional state managers from core:
 
 - **CLI/TUI**: Pass `environment` object with `transport: createTransportNode` (creates stdio, SSE, streamable-http transports directly in Node), `oauth.storage: NodeOAuthStorage` (file-based), `logger` (file-based pino logger)
-- **Web client**: Pass `environment` object with `transport: createRemoteTransport` (creates `RemoteClientTransport` that talks to remote API server), `fetch: createRemoteFetch`, `logger: createRemoteLogger`, `oauth.storage: BrowserOAuthStorage` or `RemoteOAuthStorage` (sessionStorage or HTTP API)
+- **Web client**: Pass `environment` object with `transport: createRemoteTransport` (creates `RemoteClientTransport` that talks to remote API server), `fetch: createRemoteFetch`, `logger: createRemoteLogger`, `oauth.storage`: today **`BrowserOAuthStorage`** in the web factory; target **`RemoteOAuthStorage`** for shared `oauth.json` with Node
 
 `InspectorClient` uses these injected dependencies to create transports and manage OAuth, remaining portable across all environments.
 
@@ -223,7 +223,7 @@ This provides a single entry point with consistent argument parsing across all t
 
 The web client uses InspectorClient for all MCP operations:
 
-- **Environment**: `createWebEnvironment()` supplies `createRemoteTransport`, `createRemoteFetch`, `createRemoteLogger`, and OAuth storage/navigation. The browser talks to the same-origin API server (Hono `createRemoteApp`) for transport, fetch proxy, logging, and storage.
+- **Environment**: `createWebEnvironment()` supplies `createRemoteTransport`, `createRemoteFetch`, `createRemoteLogger`, and OAuth storage/navigation. The browser talks to the same-origin API server (Hono `createRemoteApp`) for transport, fetch proxy, logging, and **`/api/storage/*`** (used for session persistence; **OAuth** tokens are still **`BrowserOAuthStorage`** until the factory switches to **`RemoteOAuthStorage`**).
 - **Lifecycle**: InspectorClient is created lazily via `ensureInspectorClient()` when the user connects or performs OAuth. The app attaches the same state managers (e.g. PagedToolsState, MessageLogState) and uses `useInspectorClient`, `usePagedTools`, `useMessageLog`, etc.
 - **Config**: Web UI config (transport type, URL, command/args for stdio, headers, OAuth) is converted to `MCPServerConfig` and `InspectorClientOptions` when creating the client.
 
@@ -237,22 +237,24 @@ InspectorClient supports OAuth (static client, CIMD, DCR, guided auth), completi
 
 The web client uses **InspectorClient** and the same state managers and hooks as the TUI. Core functionality:
 
-| Capability                             | Web client implementation                                                                            |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Connection management                  | InspectorClient `connect()`, `disconnect()`, status events                                           |
-| Tools, resources, prompts              | State managers (PagedToolsState, etc.) + hooks; InspectorClient methods                              |
-| Message tracking                       | MessageLogState + useMessageLog; MessageEntry[]                                                      |
-| OAuth                                  | environment.oauth (BrowserOAuthStorage or RemoteOAuthStorage), environment.fetch (createRemoteFetch) |
-| Custom headers                         | headers in MCPServerConfig (SSE/streamable-http)                                                     |
-| Elicitation, sampling, roots, progress | InspectorClient events and methods; state managers as needed                                         |
-| Request history                        | FetchRequestLogState + useFetchRequestLog                                                            |
-| Transport                              | createRemoteTransport (talks to Hono API server)                                                     |
+| Capability                             | Web client implementation                                                                                             |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Connection management                  | InspectorClient `connect()`, `disconnect()`, status events                                                            |
+| Tools, resources, prompts              | State managers (PagedToolsState, etc.) + hooks; InspectorClient methods                                               |
+| Message tracking                       | MessageLogState + useMessageLog; MessageEntry[]                                                                       |
+| OAuth                                  | environment.oauth (web: BrowserOAuthStorage today; RemoteOAuthStorage planned), environment.fetch (createRemoteFetch) |
+| Custom headers                         | headers in MCPServerConfig (SSE/streamable-http)                                                                      |
+| Elicitation, sampling, roots, progress | InspectorClient events and methods; state managers as needed                                                          |
+| Request history                        | FetchRequestLogState + useFetchRequestLog                                                                             |
+| Transport                              | createRemoteTransport (talks to Hono API server)                                                                      |
 
 ### Environment Isolation: What's Done vs. Pending
 
 Per [environment-isolation.md](environment-isolation.md):
 
 **Implemented:** All environment-specific dependencies are consolidated into `InspectorClientEnvironment` (transport, fetch, logger, oauth.storage, oauth.navigation, oauth.redirectUrlProvider). Transport is required; fetch, logger, and OAuth components are optional. Node uses `createTransportNode`; browser uses `createRemoteTransport`, `createRemoteFetch`, `createRemoteLogger`. Core runs in Node (CLI, TUI) and browser (web client).
+
+**Pending:** Wire **`RemoteOAuthStorage`** into `createWebEnvironment()` so OAuth uses **`/api/storage/oauth`** alongside Node clients (see [environment-isolation.md](environment-isolation.md)).
 
 **Implemented (remote infrastructure):**
 
@@ -264,7 +266,7 @@ Per [environment-isolation.md](environment-isolation.md):
 - **Generic storage API** — `GET/POST/DELETE /api/storage/:storeId` endpoints for shared on-disk state between web app and TUI/CLI. See [environment-isolation.md](environment-isolation.md).
 - **Node code organization** — `core/auth/node/`, `core/mcp/node/`, `core/mcp/remote/node/`.
 
-**Summary:** The web client uses InspectorClient with `createRemoteTransport`, `createRemoteFetch`, `createRemoteLogger`, and OAuth storage adapters. The Hono API server (`createRemoteApp`) is integrated into the web app server (see `web/src/server.ts`). The web app creates InspectorClient lazily (`ensureInspectorClient`), attaches state managers, and uses the same React hooks (`useInspectorClient`, `usePagedTools`, `useMessageLog`, etc.) as the TUI.
+**Summary:** The web client uses InspectorClient with `createRemoteTransport`, `createRemoteFetch`, `createRemoteLogger`, and OAuth storage (`BrowserOAuthStorage` in the factory today; `RemoteOAuthStorage` planned). The Hono API server (`createRemoteApp`) is integrated into the web app server (see `web/src/server.ts`). The web app creates InspectorClient lazily (`ensureInspectorClient`), attaches state managers, and uses the same React hooks (`useInspectorClient`, `usePagedTools`, `useMessageLog`, etc.) as the TUI.
 
 ## Web Client Implementation Notes
 
@@ -274,7 +276,7 @@ The web client uses InspectorClient and state managers. Key pieces:
 
 - **Environment**: `createWebEnvironment()` (in `web/src/lib/adapters/environmentFactory.ts`) builds `InspectorClientEnvironment` with `createRemoteTransport`, `createRemoteFetch`, `createRemoteLogger`, and OAuth storage/navigation/redirect providers. The web server runs `createRemoteApp` (Hono) and serves `/api/mcp/*`, `/api/fetch`, `/api/log`, `/api/storage/*`.
 - **InspectorClient lifecycle**: The web app creates InspectorClient lazily via `ensureInspectorClient()` when the user connects or performs auth. Config is converted to `MCPServerConfig`; the same state managers (PagedToolsState, MessageLogState, etc.) and hooks (`useInspectorClient`, `usePagedTools`, `useMessageLog`, etc.) as the TUI are used.
-- **OAuth**: Injected via environment (`BrowserOAuthStorage` or `RemoteOAuthStorage`, `BrowserNavigation`, redirect URL provider). The web app implements the `oauth/callback` route and calls `inspectorClient.completeOAuthFlow()` or guided-auth APIs as needed.
+- **OAuth**: Injected via environment (`BrowserOAuthStorage` today; migrate to `RemoteOAuthStorage` for shared store, `BrowserNavigation`, redirect URL provider). The web app implements the `oauth/callback` route and calls `inspectorClient.completeOAuthFlow()` or guided-auth APIs as needed.
 - **State**: MessageEntry[], fetch request log, stderr log, tools/resources/prompts/tasks all come from state managers subscribed to InspectorClient events; no separate useConnection state.
 
 ## Summary

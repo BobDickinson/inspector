@@ -12,14 +12,14 @@ We use the term **seams** for the individual integration points where environmen
 
 These seams provide environment-specific functionality to InspectorClient:
 
-| Seam                   | Abstraction                  | Node Implementation                                           | Browser Implementation (Web App)                                                                                                      |
-| ---------------------- | ---------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| **Transport creation** | `CreateTransport` (required) | `createTransportNode` (creates stdio, SSE, streamable-http)   | `createRemoteTransport` (creates `RemoteClientTransport` talking to remote API)                                                       |
-| **OAuth storage**      | `OAuthStorage`               | `NodeOAuthStorage` (file-based / Zustand)                     | `BrowserOAuthStorage` (sessionStorage via Zustand)<br>`RemoteOAuthStorage` (HTTP API → file-based / Zustand via `/api/storage/oauth`) |
-| **OAuth navigation**   | `OAuthNavigation`            | `CallbackNavigation` (e.g. opens URL via `open`)              | `BrowserNavigation` (redirects)                                                                                                       |
-| **OAuth redirect URL** | `RedirectUrlProvider`        | `MutableRedirectUrlProvider` (populated from callback server) | `() => \`${window.location.origin}/oauth/callback\`` (single redirect URL with state parameter)                                       |
-| **OAuth HTTP fetch**   | Optional `fetchFn`           | N/A (Node has no CORS)                                        | `createRemoteFetch` (POSTs to `/api/fetch` for OAuth CORS bypass)                                                                     |
-| **Logging**            | Optional `logger`            | File-based pino logger                                        | `createRemoteLogger` (POSTs to `/api/log`)                                                                                            |
+| Seam                   | Abstraction                  | Node Implementation                                           | Browser Implementation (Web App)                                                                                                                                                                             |
+| ---------------------- | ---------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Transport creation** | `CreateTransport` (required) | `createTransportNode` (creates stdio, SSE, streamable-http)   | `createRemoteTransport` (creates `RemoteClientTransport` talking to remote API)                                                                                                                              |
+| **OAuth storage**      | `OAuthStorage`               | `NodeOAuthStorage` (file-based / Zustand)                     | Inspector web app **today:** `BrowserOAuthStorage` (sessionStorage). **Planned:** `RemoteOAuthStorage` via `/api/storage/oauth` so OAuth state matches Node’s `oauth.json` on the API host (see note below). |
+| **OAuth navigation**   | `OAuthNavigation`            | `CallbackNavigation` (e.g. opens URL via `open`)              | `BrowserNavigation` (redirects)                                                                                                                                                                              |
+| **OAuth redirect URL** | `RedirectUrlProvider`        | `MutableRedirectUrlProvider` (populated from callback server) | `() => \`${window.location.origin}/oauth/callback\`` (single redirect URL with state parameter)                                                                                                              |
+| **OAuth HTTP fetch**   | Optional `fetchFn`           | N/A (Node has no CORS)                                        | `createRemoteFetch` (POSTs to `/api/fetch` for OAuth CORS bypass)                                                                                                                                            |
+| **Logging**            | Optional `logger`            | File-based pino logger                                        | `createRemoteLogger` (POSTs to `/api/log`)                                                                                                                                                                   |
 
 **InspectorClientEnvironment structure:**
 
@@ -106,7 +106,9 @@ const client = new InspectorClient(config, {
 });
 ```
 
-**Note:** OAuth configuration (clientId, clientSecret, clientMetadataUrl, scope) is separate from environment components and goes in the top-level `oauth` property. The web app uses `BrowserOAuthStorage` (sessionStorage) for browser-only OAuth state. For shared state with Node apps (TUI/CLI), use `RemoteOAuthStorage` instead.
+**Note:** OAuth configuration (clientId, clientSecret, clientMetadataUrl, scope) is separate from environment components and goes in the top-level `oauth` property.
+
+**Browser OAuth store (work not done yet):** `createWebEnvironment()` in `web/src/lib/adapters/environmentFactory.ts` still uses **`BrowserOAuthStorage`**, so OAuth tokens and client registration live in **sessionStorage** and **do not** match CLI/TUI **`NodeOAuthStorage`** (`~/.mcp-inspector/storage/oauth.json`). **`RemoteOAuthStorage`** (same Zustand shape, `storeId` **`oauth`**, Inspector API **`GET/POST /api/storage/oauth`**) is implemented in core and is the intended replacement: switch the web factory to `RemoteOAuthStorage` with the same `baseUrl`, `authToken`, and `fetchFn` as `createRemoteFetch` / `createRemoteTransport`, so the browser reads and writes the **same** server-backed store as Node clients on that machine.
 
 ---
 
@@ -267,7 +269,7 @@ OAuth tokens and other state need to persist across sessions. In Node (TUI, CLI)
 
 **Design Details:** The server treats stores as opaque JSON blobs (Zustand's persist format: `{ state: {...}, version: 0 }`). Store IDs are arbitrary (e.g. `oauth`, `inspector-settings`). All OAuth storage implementations use the same Zustand-backed pattern for consistency. `RemoteOAuthStorage` fetches the store on initialization, implements `OAuthStorage` against the in-memory structure, and persists changes via POST. This enables shared OAuth state when the web app runs alongside the Node process hosting the remote API (e.g. Vite dev server with Hono backend).
 
-**Web App Usage:** The web app uses `BrowserOAuthStorage` (sessionStorage) for browser-only OAuth state. This provides isolation between browser sessions but does not share state with TUI/CLI. To enable shared OAuth state with Node apps, switch to `RemoteOAuthStorage` in `createWebEnvironment()`.
+**Web App Usage (target):** The Inspector web app should use **`RemoteOAuthStorage`** in `createWebEnvironment()` (not yet switched in code) so OAuth state is stored server-side and matches CLI/TUI when they use the default Node store on the same host. **Today** the factory still uses **`BrowserOAuthStorage`**; see the note under the browser usage example above.
 
 **Session persistence across OAuth:** InspectorClient can optionally persist session state (e.g. fetch history) across the OAuth redirect. This is an InspectorClient feature that reuses the same remote storage seam: the web app passes optional `sessionStorage` (e.g. `RemoteInspectorClientStorage`) and `sessionId` (from the OAuth `state` parameter). InspectorClient saves session before navigating to the auth provider and restores it when the client is recreated after the callback. Store IDs follow the pattern `inspector-session-{sessionId}` and use the existing `GET/POST /api/storage/:storeId` endpoints.
 
@@ -312,7 +314,7 @@ The current web client and server functionality has been ported to a new web app
   - `createRemoteTransport()` for all transport types (stdio, SSE, streamable-http)
   - `createRemoteFetch()` for OAuth HTTP requests (CORS bypass)
   - `createRemoteLogger()` for persistent logging
-  - `BrowserOAuthStorage` and `BrowserNavigation` for OAuth flows
+  - `BrowserOAuthStorage` and `BrowserNavigation` for OAuth flows today; **`RemoteOAuthStorage`** (`/api/storage/oauth`) is the planned change for shared OAuth with Node (not yet wired in this factory)
 - **Lazy Client Creation:** Uses `ensureInspectorClient()` helper that validates API token before creating client
 - **OAuth Integration:** Single redirect URL (`/oauth/callback`) with mode encoded in state parameter; supports both normal and guided flows
 - **Initial Config:** Web app fetches `GET /api/config` (with `x-mcp-remote-auth`) on load; response sets command, args, transport, server URL, and env. Same in dev and prod.
